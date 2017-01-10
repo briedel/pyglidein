@@ -109,7 +109,11 @@ class SubmitPBS(Submit):
         else:
             self.write_option(f, "-l nodes=%d:ppn=%d:gpus=%d" %\
                             (num_nodes, num_cpus, num_gpus))
-        self.write_option(f, "-l pmem=%dmb" % mem)
+        if ("Cluster" in self.config and 'pmem_only' in self.config['Cluster']
+            and self.config["Cluster"]["pmem_only"]):
+            self.write_option(f, "-l pmem=%dmb" % mem)
+        else:
+            self.write_option(f, "-l pmem=%dmb,mem=%dmb" % (mem,mem*num_cpus))
         self.write_option(f, "-l walltime=%d:00:00" % walltime_hours)
         if ('Mode' in self.config and 'debug' in self.config['Mode']
            and self.config["Mode"]["debug"]):
@@ -177,8 +181,10 @@ class SubmitPBS(Submit):
         if not glidein_loc:
             glidein_loc = os.getcwd()
         if glidein_tarball:
-            self.write_line(f, 'ln -s %s %s' % (glidein_tarball, os.path.basename(glidein_tarball)))
-        self.write_line(f, 'ln -s %s %s' % (os.path.join(glidein_loc, glidein_script), glidein_script))
+            self.write_line(f, 'ln -fs %s %s' % (glidein_tarball, os.path.basename(glidein_tarball)))
+        self.write_line(f, 'ln -fs %s %s' % (os.path.join(glidein_loc, glidein_script), glidein_script))
+        if not os.path.isfile(os.path.join(glidein_loc, glidein_script)):
+            raise Exception("glidein_script %s does not exist!"%os.path.join(glidein_loc, glidein_script))
 
         f.write('env -i CPUS=$CPUS GPUS=$GPUS MEMORY=$MEMORY DISK=$DISK WALLTIME=$WALLTIME ')
         if 'site' in self.config['Glidein']:
@@ -196,6 +202,38 @@ class SubmitPBS(Submit):
         self.write_line(f, 'if [ $CLEANUP = 1 ]; then')
         self.write_line(f, '    rm -rf $LOCAL_DIR')
         self.write_line(f, 'fi')
+
+    def get_cores_for_memory(self, num_cpus_advertised, num_gpus_advertised, mem_advertised):
+        """
+        Scale number of cores to satisfy memory request, assuming fixed amount
+        of memory per core.
+        
+        Args:
+            num_cpus_advertised: the number of cores explicitly requested
+            num_gpus_advertised: the number of GPUs explicitly requested
+            mem_advertised: the total amount of memory requested
+        Returns:
+            num_cpus: number of cores to request
+            mem_requested: amount of memory to request per core
+            mem_advertised: amount of memory the Condor slot should advertise
+        """
+        num_cpus = num_cpus_advertised
+        mem_requested = mem_advertised
+        mem_per_core = 2000
+        if 'mem_per_core' in self.config['Cluster']:
+            mem_per_core = self.config['Cluster']['mem_per_core']
+        if num_gpus_advertised:
+            if mem_requested > mem_per_core:
+                # just ask for the max mem, and hope that's good enough
+                mem_requested = mem_per_core
+                mem_advertised = mem_requested
+        else:
+            # It is easier to request more cpus rather than more memory
+            while mem_requested > mem_per_core:
+                num_cpus += 1
+                mem_requested = mem_advertised/num_cpus
+        
+        return num_cpus, mem_requested, mem_advertised
 
     def write_submit_file(self, filename, state, group_jobs):
         """
@@ -218,23 +256,10 @@ class SubmitPBS(Submit):
                 num_cpus = state["cpus"]
                 mem_safety_margin = 1.05*self.get_resource_limit_scale("mem_safety_scale")
                 mem_advertised = int(state["memory"]*mem_safety_margin)
-                mem_requested = mem_advertised
                 num_gpus = state["gpus"]
                 disk = state["disk"]*1.1
 
-                mem_per_core = 2000
-                if 'mem_per_core' in self.config['Cluster']:
-                    mem_per_core = self.config['Cluster']['mem_per_core']
-                if num_gpus:
-                    if mem_requested > mem_per_core:
-                        # just ask for the max mem, and hope that's good enough
-                        mem_requested = mem_per_core
-                        mem_advertised = mem_requested
-                else:
-                    # It is easier to request more cpus rather than more memory
-                    while mem_requested > mem_per_core:
-                        num_cpus += 1
-                        mem_requested = mem_advertised/num_cpus
+                num_cpus, mem_requested, mem_advertised = self.get_cores_for_memory(num_cpus, num_gpus, mem_advertised)
 
             walltime = int(self.config["Cluster"]["walltime_hrs"])
 
@@ -256,11 +281,12 @@ class SubmitPBS(Submit):
                 'local_dir': self.config["SubmitFile"]["local_dir"],
                 'glidein_script': self.get_glidein_script(),
             }
+            if "loc" in self.config["Glidein"]:
+                kwargs['glidein_loc'] = self.config["Glidein"]["loc"]
             if "tarball" in self.config["Glidein"]:
                 if "loc" in self.config["Glidein"]:
                     glidein_tarball = os.path.join(self.config["Glidein"]["loc"], 
                                                    self.config["Glidein"]["tarball"])
-                    kwargs['glidein_loc'] = self.config["Glidein"]["loc"]
                 else:
                     glidein_tarball = self.config["Glidein"]["tarball"]
 
@@ -268,7 +294,6 @@ class SubmitPBS(Submit):
                     kwargs['glidein_tarball'] = glidein_tarball
                 else:
                     raise Exception("The tarball you provided does not exist")
-
             self.write_glidein_part(f, **kwargs)
 
             if "custom_end" in self.config["SubmitFile"]:
@@ -353,8 +378,11 @@ class SubmitSLURM(SubmitPBS):
             self.write_option(f, "--partition=%s" % self.config['Cluster']["partition"])
         self.write_option(f, "--time=%d:00:00" % walltime_hours)
         if self.config["Mode"]["debug"]:
-            self.write_option(f, "--output=%s/out/%%j.out"%os.getcwd())
-            self.write_option(f, "--error=%s/out/%%j.err"%os.getcwd())
+            log_dir = os.path.join(os.getcwd(), 'out')
+            if not os.path.isdir(log_dir):
+                os.mkdir(log_dir)
+            self.write_option(f, "--output="+os.path.join(log_dir, "%j.out"))
+            self.write_option(f, "--error="+os.path.join(log_dir, "%j.err"))
         else:
             self.write_option(f, "--output=/dev/null")
             self.write_option(f, "--error=/dev/null")
@@ -364,6 +392,14 @@ class SubmitUGE(SubmitPBS):
     """UGE is similar to PBS, but with different headers"""
     
     option_tag = "#$"
+    
+    def get_cores_for_memory(self, num_cpus_advertised, num_gpus_advertised, mem_advertised):
+        """
+        Scale number of cores to satisfy memory request.
+        
+        UGE can assign variable memory per core, so just pass the request straight through.
+        """
+        return num_cpus_advertised, mem_advertised, mem_advertised
     
     def write_general_header(self, f, mem=3000, walltime_hours=14, disk=1,
                              num_nodes=1, num_cpus=1, num_gpus=0,
