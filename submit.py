@@ -244,7 +244,7 @@ class SubmitPBS(Submit):
             state: what resource requirements a given glidein has
         """
         with open(filename, 'w') as f:
-            if 'whole_node' in self.config['Cluster']:
+            if self.config['Cluster']['whole_node']:
                 num_cpus = int(self.config['Cluster']['whole_node_cpus'])
                 mem_requested = mem_advertised = int(self.config['Cluster']['whole_node_memory'])
                 disk = int(self.config['Cluster']['whole_node_disk'])
@@ -373,7 +373,10 @@ class SubmitSLURM(SubmitPBS):
         self.write_option(f, '--ntasks-per-node=%d'%num_cpus)
         self.write_option(f, '--mem=%d'%(mem))
         if num_gpus:
-            self.write_option(f, "--gres=gpu:%d"%num_gpus)
+            gpu_submit = '--gres=gpu:%d'
+            if 'gpu_submit' in self.config['SubmitFile']:
+                gpu_submit = self.config['SubmitFile']
+            self.write_option(f, gpu_submit%num_gpus)
         if "partition" in self.config['Cluster']:
             self.write_option(f, "--partition=%s" % self.config['Cluster']["partition"])
         self.write_option(f, "--time=%d:00:00" % walltime_hours)
@@ -573,7 +576,10 @@ class SubmitCondor(Submit):
             else:
                 self.write_line(f, "output = /dev/null")
                 self.write_line(f, "error = /dev/null")
-            self.write_line(f, "log = log")
+            if 'log' in self.config['SubmitFile']:
+                self.write_line(f, "log = "+self.config['SubmitFile']['log'])
+            else:
+                self.write_line(f, "log = log")
             self.write_line(f, "notification = never")
             self.write_line(f, "should_transfer_files = YES")
             self.write_line(f, "when_to_transfer_output = ON_EXIT")
@@ -596,15 +602,29 @@ class SubmitCondor(Submit):
             if "custom_middle" in self.config["SubmitFile"]:
                 self.write_line(f, self.config["SubmitFile"]["custom_middle"])
 
-            if state["cpus"] != 0:
-                self.write_line(f, 'request_cpus=%d' % state["cpus"])
-            if state["memory"] != 0:
-                mem_safety_margin = 1.1*self.get_resource_limit_scale("mem_safety_scale")
-                self.write_line(f, 'request_memory=%d' % int(state["memory"]*mem_safety_margin))
-            if state["disk"] != 0:
-                self.write_line(f, 'request_disk=%d' % int(state["disk"]*1024*1.1))
-            if state["gpus"] != 0:
-                self.write_line(f, 'request_gpus=%d' % int(state["gpus"]))
+            if self.config['Cluster']['whole_node']:
+                num_cpus = int(self.config['Cluster']['whole_node_cpus'])
+                mem = int(self.config['Cluster']['whole_node_memory'])
+                disk = int(self.config['Cluster']['whole_node_disk'])
+                if 'whole_node_gpus' in self.config['Cluster']:
+                    num_gpus = int(self.config['Cluster']['whole_node_gpus'])
+                else:
+                    num_gpus = 0
+                self.write_line(f, 'request_cpus=%d' % num_cpus)
+                self.write_line(f, 'request_memory=%d' % mem)
+                self.write_line(f, 'request_disk=%d' % disk)
+                if state["gpus"] != 0 and num_gpus:
+                    self.write_line(f, 'request_gpus=%d' % num_gpus)
+            else:
+                if state["cpus"] != 0:
+                    self.write_line(f, 'request_cpus=%d' % state["cpus"])
+                if state["memory"] != 0:
+                    mem_safety_margin = 1.1*self.get_resource_limit_scale("mem_safety_scale")
+                    self.write_line(f, 'request_memory=%d' % int(state["memory"]*mem_safety_margin))
+                if state["disk"] != 0:
+                    self.write_line(f, 'request_disk=%d' % int(state["disk"]*1024*1.1))
+                if state["gpus"] != 0:
+                    self.write_line(f, 'request_gpus=%d' % int(state["gpus"]))
 
             if "custom_footer" in self.config["SubmitFile"]:
                 self.write_line(f, self.config["SubmitFile"]["custom_footer"])

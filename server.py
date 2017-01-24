@@ -156,11 +156,19 @@ class DefaultHandler(MyHandler):
     }
     div.clients>div>span {
       width: 15em;
+      word-wrap: break-word;
     }
   </style>
 </head>
 <body>
   <h1>Pyglidein Server</h1>
+  <h2>List of requirements</h2>
+  <div class="reqs">
+    <div><span class="num">Num</span><span>CPUs</span><span>Memory</span><span>Disk</span><span>GPUs</span><span>OS</span></div>""")
+        for row in self.cfg['state']:
+            self.write('<div><span class="num">'+str(row['count'])+'</span><span>'+str(row['cpus'])+'</span><span>'+str(row['memory'])+'</span><span>'+str(row['disk'])+'</span><span>'+str(row['gpus'])+'</span><span>'+str(row['os'])+'</span></div>')
+        self.write("""
+  </div>
   <h2>Clients</h2>
   <div class="clients">
     <div><span>UUID</span><span>Last update</span><span>Stats</span></div>""")
@@ -173,13 +181,6 @@ class DefaultHandler(MyHandler):
             except Exception:
                 logging.info('error in monitoring display: %r %r',uuid,self.cfg['monitoring'][uuid],exc_info=True)
                 continue
-        self.write("""
-  </div>
-  <h2>List of requirements</h2>
-  <div class="reqs">
-    <div><span class="num">Num</span><span>CPUs</span><span>Memory</span><span>Disk</span><span>GPUs</span><span>OS</span></div>""")
-        for row in self.cfg['state']:
-            self.write('<div><span class="num">'+str(row['count'])+'</span><span>'+str(row['cpus'])+'</span><span>'+str(row['memory'])+'</span><span>'+str(row['disk'])+'</span><span>'+str(row['gpus'])+'</span><span>'+str(row['os'])+'</span></div>')
         self.write("""
   </div>
 </body>
@@ -210,7 +211,7 @@ def get_condor_version():
 def condor_q(cfg):
     """Get the status of the HTCondor queue"""
     logger.info('condor_q')
-    cmd = ['condor_q', '-autoformat:,', 'RequestCPUs', 'RequestMemory',
+    cmd = ['condor_q', '-global', '-autoformat:,', 'RequestCPUs', 'RequestMemory',
            'RequestDisk', 'RequestGPUs', '-format', '"%s"', 'Requirements',
            '-constraint', '"JobStatus =?= 1"']
     if cfg['options'].constraint:

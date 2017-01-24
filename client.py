@@ -8,13 +8,14 @@ import logging
 import socket
 import getpass
 from optparse import OptionParser
-import ConfigParser
 import glob
 import shutil
 
 from util import json_decode
 from client_util import get_state, monitoring, config_options_dict
 import submit
+
+from config import Config
 
 logger = logging.getLogger('client')
 
@@ -27,25 +28,11 @@ def get_ssh_state():
     except Exception:
         logger.warn('error getting ssh state', exc_info=True)
 
-def launch_glidein(cmd, params=[]):
-    """
-    Command to launch a jobs using subprocess
-
-    Args:
-        cmd: Job submission command needed for the respective batch job manager
-        params: List of parameters that are passed to cmd
-    """
-    for p in params:
-        cmd += ' --'+p+' '+str(params[p])
-    print(cmd)
-    if subprocess.call(cmd, shell=True):
-        raise Exception('failed to launch glidein')
-
 def get_running(cmd):
     """Determine how many jobs are running in the queue"""
     p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
     return int(p.communicate()[0].strip())
-    
+
 def sort_states(state, columns, reverse=True):
     """
     Sort the states according to the list given by prioritize_jobs.
@@ -94,10 +81,8 @@ def main():
                       default=getpass.getuser()+'@'+socket.gethostname(),
                       help="Unique id for this client")
     (options, args) = parser.parse_args()
-    config = ConfigParser.ConfigParser()
-    config.optionxform = str
-    config.read(options.config)
-    config_dict = config_options_dict(config)
+
+    config_dict = Config(options.config)
     config_glidein = config_dict['Glidein']
     config_cluster = config_dict['Cluster']
 
@@ -123,9 +108,9 @@ def main():
 
     if ('Mode' in config_dict and 'debug' in config_dict['Mode'] and
         config_dict['Mode']['debug']):
-        logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(level=logging.DEBUG,format='%(asctime)s %(levelname)s %(message)s')
     else:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
 
     while True:
         if 'ssh_state' in config_glidein and config_glidein['ssh_state']:
@@ -149,12 +134,10 @@ def main():
                         config_cluster["max_total_jobs"] - info['glideins_running'],
                         max(config_cluster.get("max_idle_jobs", 1000) - idle, 0))
             # Prioitize job submission. By default, prioritize submission of gpu and high memory jobs. 
-            if "prioritize_jobs" in config_cluster:
-                state = sort_states(state, config_cluster["prioritize_jobs"])
-            else:
-                state = sort_states(state, ["gpus", "memory"])
+            state = sort_states(state, config_cluster["prioritize_jobs"])
             for s in state:
-                if sched_type == "pbs": s["memory"] = s["memory"]*1024/1000 
+                if sched_type == "pbs":
+                    s["memory"] = s["memory"]*1024/1000 
                 if limit <= 0:
                     logger.info('reached limit')
                     break
@@ -167,21 +150,26 @@ def main():
                     and s["gpus"] != 0):
                     continue
                 # skipping jobs over cluster resource limits
-                skip = False
+                if config_cluster['whole_node']:
+                    prefix = 'whole_node_%s'
+                else:
+                    prefix = 'max_%s_per_job'
                 for resource in ('cpus','gpus','memory','disk'):
-                    cfg_name = 'max_%s_per_job'%(resource)
+                    cfg_name = prefix%resource
                     if (cfg_name in config_cluster
                         and s[resource] > config_cluster[cfg_name]):
-                        skip = True
                         break
-                if skip:
-                    continue
-                if "count" in s and s["count"] > limit:
-                    s["count"] = limit
-                scheduler.submit(s)
-                num = 1 if "count" not in s else s["count"]
-                limit -= num
-                info['glideins_launched'] += num
+                    cfg_name = 'min_%s_per_job'%resource
+                    if (cfg_name in config_cluster
+                        and s[resource] < config_cluster[cfg_name]):
+                        break
+                else:
+                    if "count" in s and s["count"] > limit:
+                        s["count"] = limit
+                    scheduler.submit(s)
+                    num = 1 if "count" not in s else s["count"]
+                    limit -= num
+                    info['glideins_launched'] += num
             logger.info('launched %d glideins', info['glideins_launched'])
         else:
             logger.info('no state, nothing to do')
