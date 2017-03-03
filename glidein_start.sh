@@ -16,16 +16,16 @@ if [ -z $CACHE_DIR ]; then
 fi
 
 if [ -z $WALLTIME ]; then
-    # 14 hours
-    WALLTIME=50400
+    # 20 hours
+    WALLTIME=72000
 fi
 if [ -z $RETIRETIME ]; then
     # 20 minutes
     RETIRETIME=1200
 fi
 if [ -z $NOCLAIMTIME ]; then
-    # 10 minutes
-    NOCLAIMTIME=600
+    # 20 minutes
+    NOCLAIMTIME=1200
 fi
 
 if [ -z $CPUS ]; then
@@ -65,6 +65,7 @@ cd glidein
 
 export _condor_OASIS_CVMFS_Exists="${CVMFS}"
 export _condor_ICECUBE_CVMFS_Exists="${CVMFS}"
+export _condor_HAS_CVMFS_icecube_opensciencegrid_org="${CVMFS}"
 
 export _condor_CONDOR_HOST="$CLUSTER"
 export _condor_COLLECTOR_HOST="${CLUSTER}:9618?sock=collector"
@@ -79,7 +80,11 @@ export _condor_MaxJobRetirementTime=${WALLTIME}
 export _condor_SLOT1_RetirementTime="ifThenElse(MonitorSelfAge + ${RETIRETIME} > ${WALLTIME}, ${RETIRETIME}, MonitorSelfAge + ${RETIRETIME} - ${WALLTIME})";
 export _condor_DAEMON_SHUTDOWN="ifThenElse(MonitorSelfAge > ${WALLTIME}, True, False)";
 export _condor_NOT_RESPONDING_TIMEOUT="${NOCLAIMTIME}*2";
+export _condor_POLLING_INTERVAL="60";
 export _condor_HISTORY="UNDEFINED";
+export _condor_SLOTS_CONNECTED_TO_CONSOLE="0";
+export _condor_SLOTS_CONNECTED_TO_KEYBOARD="0";
+export _condor_RUNBENCHMARKS="False";
 export _condor_USE_PROCESS_GROUPS="False"
 export _condor_CONDOR_ADMIN="david.schultz@icecube.wisc.edu"
 export _condor_NUM_CPUS=${CPUS};
@@ -94,9 +99,10 @@ export _condor_SLOT_TYPE_1_PARTITIONABLE="True"
 export _condor_SLOT_TYPE_1_CONSUMPTION_POLICY="True"
 export _condor_SLOT_TYPE_1_CONSUMPTION_GPUs="quantize(ifThenElse(target.RequestGpus =!= undefined,target.RequestGpus,0),{0})";
 export _condor_SLOT_WEIGHT="Cpus";
-export _condor_SLOT1_STARTD_ATTRS="OASIS_CVMFS_Exists ICECUBE_CVMFS_Exists GLIDEIN_Site GLIDEIN_Max_Walltime GPU_NAMES"
+export _condor_SLOT1_STARTD_ATTRS="OASIS_CVMFS_Exists ICECUBE_CVMFS_Exists HAS_CVMFS_icecube_opensciencegrid_org GLIDEIN_Site GLIDEIN_Max_Walltime GPU_NAMES"
 export _condor_STARTER_JOB_ENVIRONMENT="\"GLIDEIN_Site=${SITE} GLIDEIN_LOCAL_TMP_DIR=${PWD} GOTO_NUM_THREADS=1\"";
 export _condor_START="ifThenElse(ifThenElse(MY.GPUs =!= undefined,MY.GPUs,0) > 0,ifThenElse(TARGET.RequestGPUs =!= undefined,TARGET.RequestGPUs,0) > 0,TRUE)";
+export _condor_RANK="ImageSize";
 export _condor_UID_DOMAIN=""
 #export _condor_FILESYSTEM_DOMAIN=${DOMAIN}
 export _condor_MAIL=/bin/mail;
@@ -108,11 +114,48 @@ export _condor_UPDATE_COLLECTOR_WITH_TCP="True"
 export _campusfactory_CAMPUSFACTORY_LOCATION=$PWD
 export _condor_USER_JOB_WRAPPER=$PWD/user_job_wrapper.sh
 
-if [ ! -e $GLIDEIN_DIR/glidein.tar.gz ]; then
-  wget -nv http://prod-exe.icecube.wisc.edu/glidein.tar.gz
-  GLIDEIN_DIR=$PWD
+# detect CVMFS and get the OS type
+OS_ARCH="RHEL_6_x86_64"
+. $GLIDEIN_DIR/os_arch.sh
+
+if [ -e $GLIDEIN_DIR/glidein.tar.gz ]; then
+  tar xzf $GLIDEIN_DIR/glidein.tar.gz
+else
+  if wget -nv http://prod-exe.icecube.wisc.edu/glidein-$OS_ARCH.tar.gz ; then
+    tar xzf glidein-$OS_ARCH.tar.gz
+  else
+    wget -nv http://prod-exe.icecube.wisc.edu/glidein.tar.gz
+    tar xzf glidein.tar.gz
+  fi
 fi
-tar xzf $GLIDEIN_DIR/glidein.tar.gz
+
+# test for cvmfs
+CVMFS="false"
+if [ -e /cvmfs/icecube.opensciencegrid.org/py2-v1/setup.sh ]; then
+    CVMFS="true"
+else
+    # test parrot
+    if [ -z $http_proxy ]; then
+        http_proxy=http://squid.icecube.wisc.edu:3128
+    fi
+    cat > $PWD/parrot_job_env.sh << "EOF"
+#!/bin/sh
+$@
+EOF
+    chmod +x $PWD/parrot_job_env.sh
+    if /usr/bin/env -i \
+       GLIDEIN_PARROT=${PWD}/GLIDEIN_PARROT \
+       _CONDOR_SCRATCH_DIR=${PWD} \
+       _CONDOR_SLOT="" \
+       http_proxy=${http_proxy} \
+       GLIDEIN_PARROT/run_parrot ls /cvmfs/icecube.opensciencegrid.org/py2-v1/setup.sh >/dev/null 2>/dev/null ; then
+        CVMFS="true"
+    fi
+fi
+if [ "$CVMFS" = "false" ]; then
+    echo "CVMFS missing. This glidein won't work, so kill."
+    exit 1
+fi
 
 export campus_factory_dir=$PWD
 
@@ -121,13 +164,15 @@ export _condor_LOCAL_DIR=$PWD
 export _condor_SBIN=$PWD/glideinExec/sbin
 export _condor_LIB=$PWD/glideinExec/lib
 
-# make a job wrapper
-cat > $PWD/job_wrapper.sh << "EOF"
+if [ -n "$CVMFS_JOB_WRAPPER" ]; then
+    # make a job wrapper
+    cat > $PWD/job_wrapper.sh << "EOF"
 #!/bin/sh
 eval `/cvmfs/icecube.opensciencegrid.org/py2-v1/setup.sh`
 $@
 EOF
-chmod +x $PWD/job_wrapper.sh
+    chmod +x $PWD/job_wrapper.sh
+fi
 
 export PATH=$PATH:$_condor_SBIN:$PWD/glideinExec/bin
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$_condor_LIB

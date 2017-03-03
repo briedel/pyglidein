@@ -182,15 +182,20 @@ class SubmitPBS(Submit):
             glidein_loc = os.getcwd()
         if glidein_tarball:
             self.write_line(f, 'ln -fs %s %s' % (glidein_tarball, os.path.basename(glidein_tarball)))
-        self.write_line(f, 'ln -fs %s %s' % (os.path.join(glidein_loc, glidein_script), glidein_script))
         if not os.path.isfile(os.path.join(glidein_loc, glidein_script)):
             raise Exception("glidein_script %s does not exist!"%os.path.join(glidein_loc, glidein_script))
+        self.write_line(f, 'ln -fs %s %s' % (os.path.join(glidein_loc, glidein_script), glidein_script))
+        if not os.path.isfile(os.path.join(glidein_loc, 'os_arch.sh')):
+            raise Exception("%s does not exist!"%os.path.join(glidein_loc, 'os_arch.sh'))
+        self.write_line(f, 'ln -fs %s %s' % (os.path.join(glidein_loc, 'os_arch.sh'), 'os_arch.sh'))
 
         f.write('env -i CPUS=$CPUS GPUS=$GPUS MEMORY=$MEMORY DISK=$DISK WALLTIME=$WALLTIME ')
         if 'site' in self.config['Glidein']:
             f.write('SITE=$SITE ')
         if 'cluster' in self.config['Glidein']:
             f.write('CLUSTER=$CLUSTER ')
+        if self.config['SubmitFile'].get('cvmfs_job_wrapper', False):
+            f.write('CVMFS_JOB_WRAPPER=1 ')
         if "CustomEnv" in self.config:
             for k, v in self.config["CustomEnv"].items():
                 f.write(k + '=' + v + ' ')
@@ -375,7 +380,7 @@ class SubmitSLURM(SubmitPBS):
         if num_gpus:
             gpu_submit = '--gres=gpu:%d'
             if 'gpu_submit' in self.config['SubmitFile']:
-                gpu_submit = self.config['SubmitFile']
+                gpu_submit = self.config['SubmitFile']['gpu_submit']
             self.write_option(f, gpu_submit%num_gpus)
         if "partition" in self.config['Cluster']:
             self.write_option(f, "--partition=%s" % self.config['Cluster']["partition"])
@@ -542,6 +547,8 @@ class SubmitCondor(Submit):
                 f.write('SITE=$SITE ')
             if 'cluster' in self.config['Glidein']:
                 f.write('CLUSTER=$CLUSTER ')
+            if self.config['SubmitFile'].get('cvmfs_job_wrapper', False):
+                f.write('CVMFS_JOB_WRAPPER=1 ')
             if "CustomEnv" in self.config:
                 for k, v in self.config["CustomEnv"].items():
                     f.write(k + '=' + v + ' ')
@@ -593,6 +600,10 @@ class SubmitCondor(Submit):
             if not os.path.isfile(glidein_script):
                 raise Exception("no glidein_script provided")
             infiles.append(glidein_script)
+            osarch_script = os.path.join(os.path.dirname(glidein_script),'os_arch.sh')
+            if not os.path.isfile(osarch_script):
+                raise Exception("os_arch.sh not found")
+            infiles.append(osarch_script)
             if "tarball" in self.config["Glidein"]:
                 if not os.path.isfile(self.config["Glidein"]["tarball"]):
                     raise Exception("provided tarball does not exist")
